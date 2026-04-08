@@ -469,30 +469,31 @@ HOST = "127.0.0.1"
 
 
 def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> bytes:
-    # List all supported APIs
-    # Caps are set to the highest version each handler's *response* fully implements.
-    # Two reasons a cap must be lowered:
-    #  (a) The version introduces new response fields the handler doesn't write
-    #      → client misparsed everything that follows the missing field.
-    #  (b) The version switches to "flexible" (compact varint) encoding
-    #      → this emulator uses fixed-width encoding throughout.
-    #
-    # Key thresholds (response-field additions):
+    # kafka-clients 3.x sends ApiVersions at v3 (the highest it supports) before
+    # it knows what the server supports. v3+ uses flexible/compact encoding for
+    # both the request header and the response body. This emulator only speaks
+    # fixed-width encoding, so we return UNSUPPORTED_VERSION for v3+. The client
+    # will then retry with v0/v2, which we handle correctly.
+    if api_version >= 3:
+        w = Writer()
+        w.int16(35)   # UNSUPPORTED_VERSION
+        w.int32(0)    # empty api_versions array — v0-compatible fallback format
+        return frame(correlation_id, w.build())
+
+    # Caps are set to the highest version each handler's *response* fully
+    # implements, staying below flexible-encoding boundaries.
+    # Response-field additions that force caps down:
     #   Produce  v8: adds record_errors + error_message per partition
     #   Fetch    v8: adds preferred_read_replica per partition
     #   ListOffsets v5: adds leader_epoch per partition
-    #   Metadata v8: adds cluster_authorized_operations + topic_authorized_operations
+    #   Metadata v8: adds cluster/topic authorized_operations fields
     #   OffsetFetch v6: adds leader_epoch per partition
-    # Flexible-encoding boundaries (also a hard limit):
-    #   Produce v9+, Fetch v12+, ListOffsets v6+, Metadata v9+, OffsetFetch v8+,
-    #   FindCoordinator v4+, JoinGroup v6+, Heartbeat/LeaveGroup/SyncGroup v4+,
-    #   ApiVersions v3+.
     apis = [
-        (0, 0, 7),    # Produce   (v8 adds record_errors to response)
-        (1, 0, 7),    # Fetch     (v8 adds preferred_read_replica to response)
-        (2, 0, 4),    # ListOffsets (v5 adds leader_epoch to response)
-        (3, 0, 7),    # Metadata  (v8 adds authorized_operations to response)
-        (8, 0, 5),    # OffsetFetch (v6 adds leader_epoch to response)
+        (0, 0, 7),    # Produce
+        (1, 0, 7),    # Fetch
+        (2, 0, 4),    # ListOffsets
+        (3, 0, 7),    # Metadata
+        (8, 0, 5),    # OffsetFetch
         (9, 0, 3),    # FindCoordinator
         (10, 0, 5),   # JoinGroup
         (11, 0, 3),   # Heartbeat
@@ -505,7 +506,8 @@ def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> byt
     w.int32(len(apis))
     for api_key, min_v, max_v in apis:
         w.int16(api_key).int16(min_v).int16(max_v)
-    w.int32(0)   # throttle_time_ms
+    if api_version >= 1:
+        w.int32(0)   # throttle_time_ms (added in v1; must be absent for v0)
     return frame(correlation_id, w.build())
 
 
@@ -906,7 +908,14 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             api_key = r.int16()
             api_version = r.int16()
             correlation_id = r.int32()
-            client_id = r.string()
+            # ApiVersions v3+ uses Request Header v2 where client_id is a
+            # compact (varint-length) string followed by a tagged-fields varint.
+            # All other API versions we support use Header v1 (int16-length string).
+            if api_key == 18 and api_version >= 3:
+                client_id = r.compact_string()
+                r._varint_u()  # skip tagged fields
+            else:
+                client_id = r.string()
 
             api_name = API_NAMES.get(api_key, f"Unknown({api_key})")
             log.debug(f"← {api_name} v{api_version} corr={correlation_id} client={client_id}")
