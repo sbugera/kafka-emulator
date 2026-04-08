@@ -284,8 +284,13 @@ class Writer:
         return bytes(self.buf)
 
 
-def frame(correlation_id: int, body: bytes) -> bytes:
-    resp = struct.pack(">i", correlation_id) + body
+def frame(correlation_id: int, body: bytes, flexible: bool = False) -> bytes:
+    # flexible=True: Response Header v1 — append a 0x00 tagged-fields byte
+    # after the correlation_id (required for flexible/compact API versions).
+    if flexible:
+        resp = struct.pack(">i", correlation_id) + b'\x00' + body
+    else:
+        resp = struct.pack(">i", correlation_id) + body
     return struct.pack(">i", len(resp)) + resp
 
 
@@ -469,25 +474,16 @@ HOST = "127.0.0.1"
 
 
 def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> bytes:
-    # kafka-clients 3.x sends ApiVersions at v3 (the highest it supports) before
-    # it knows what the server supports. v3+ uses flexible/compact encoding for
-    # both the request header and the response body. This emulator only speaks
-    # fixed-width encoding, so we return UNSUPPORTED_VERSION for v3+. The client
-    # will then retry with v0/v2, which we handle correctly.
-    if api_version >= 3:
-        w = Writer()
-        w.int16(35)   # UNSUPPORTED_VERSION
-        w.int32(0)    # empty api_versions array — v0-compatible fallback format
-        return frame(correlation_id, w.build())
-
     # Caps are set to the highest version each handler's *response* fully
-    # implements, staying below flexible-encoding boundaries.
-    # Response-field additions that force caps down:
+    # implements. Response-field additions that force caps down:
     #   Produce  v8: adds record_errors + error_message per partition
     #   Fetch    v8: adds preferred_read_replica per partition
     #   ListOffsets v5: adds leader_epoch per partition
     #   Metadata v8: adds cluster/topic authorized_operations fields
     #   OffsetFetch v6: adds leader_epoch per partition
+    # Flexible-encoding boundary (also a hard cap for non-ApiVersions APIs):
+    #   Produce v9+, Fetch v12+, ListOffsets v6+, Metadata v9+, OffsetFetch v8+,
+    #   FindCoordinator v4+, JoinGroup v6+, Heartbeat/LeaveGroup/SyncGroup v4+.
     apis = [
         (0, 0, 7),    # Produce
         (1, 0, 7),    # Fetch
@@ -499,15 +495,32 @@ def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> byt
         (11, 0, 3),   # Heartbeat
         (12, 0, 3),   # LeaveGroup
         (13, 0, 3),   # SyncGroup
-        (18, 0, 2),   # ApiVersions
+        (18, 0, 3),   # ApiVersions — we now support v3 (flexible encoding)
     ]
+
+    if api_version >= 3:
+        # v3+ uses flexible/compact encoding:
+        #   response body: int16 error_code, compact_array api_keys,
+        #                  int32 throttle_time_ms, varint tagged_fields
+        #   each api_key entry: int16×3 + varint tagged_fields
+        #   response header: correlation_id + varint tagged_fields (flexible=True)
+        w = Writer()
+        w.int16(0)               # error_code
+        w._varint_u(len(apis) + 1)  # compact array: N+1 encodes N elements
+        for api_key, min_v, max_v in apis:
+            w.int16(api_key).int16(min_v).int16(max_v)
+            w._varint_u(0)       # per-entry tagged fields
+        w.int32(0)               # throttle_time_ms
+        w._varint_u(0)           # top-level tagged fields
+        return frame(correlation_id, w.build(), flexible=True)
+
     w = Writer()
     w.int16(0)  # error_code
     w.int32(len(apis))
     for api_key, min_v, max_v in apis:
         w.int16(api_key).int16(min_v).int16(max_v)
     if api_version >= 1:
-        w.int32(0)   # throttle_time_ms (added in v1; must be absent for v0)
+        w.int32(0)   # throttle_time_ms (added in v1; absent in v0)
     return frame(correlation_id, w.build())
 
 
@@ -918,7 +931,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 client_id = r.string()
 
             api_name = API_NAMES.get(api_key, f"Unknown({api_key})")
-            log.debug(f"← {api_name} v{api_version} corr={correlation_id} client={client_id}")
+            log.info(f"← {api_name} v{api_version} corr={correlation_id} client={client_id}")
 
             handler = HANDLERS.get(api_key)
             if handler:
