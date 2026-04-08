@@ -496,6 +496,7 @@ def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> byt
         (12, 0, 3),   # LeaveGroup
         (13, 0, 3),   # SyncGroup
         (18, 0, 3),   # ApiVersions — we now support v3 (flexible encoding)
+        (22, 0, 3),   # InitProducerId
     ]
 
     if api_version >= 3:
@@ -884,6 +885,23 @@ def handle_offset_fetch(r: Reader, api_version: int, correlation_id: int) -> byt
     return frame(correlation_id, w.build())
 
 
+def handle_init_producer_id(r: Reader, api_version: int, correlation_id: int) -> bytes:
+    # kafka-clients 3.x enables idempotent producers by default, which requires
+    # this API. Return a fixed producer_id so the client can proceed without
+    # transactions.
+    _transactional_id = r.string()
+    _transaction_timeout_ms = r.int32()
+    if api_version >= 3:
+        _producer_id = r.int64()
+        _producer_epoch = r.int16()
+    w = Writer()
+    w.int32(0)    # throttle_time_ms
+    w.int16(0)    # error_code
+    w.int64(1)    # producer_id
+    w.int16(0)    # producer_epoch
+    return frame(correlation_id, w.build())
+
+
 HANDLERS = {
     0:  handle_produce,
     1:  handle_fetch,
@@ -896,12 +914,14 @@ HANDLERS = {
     12: handle_leave_group,
     13: handle_sync_group,
     18: handle_api_versions,
+    22: handle_init_producer_id,
 }
 
 API_NAMES = {
     0: "Produce", 1: "Fetch", 2: "ListOffsets", 3: "Metadata",
     8: "OffsetFetch", 9: "FindCoordinator", 10: "JoinGroup",
     11: "Heartbeat", 12: "LeaveGroup", 13: "SyncGroup", 18: "ApiVersions",
+    22: "InitProducerId",
 }
 
 
