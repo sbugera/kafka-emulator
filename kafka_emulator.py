@@ -470,17 +470,29 @@ HOST = "127.0.0.1"
 
 def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> bytes:
     # List all supported APIs
-    # Max versions are capped just below where the Kafka protocol switches to
-    # "flexible" (compact varint) encoding, which this emulator does not implement.
-    # Flexible encoding boundaries: Produce v9+, Fetch v12+, ListOffsets v6+,
-    # Metadata v9+, OffsetFetch v8+, FindCoordinator v4+, JoinGroup v6+,
-    # Heartbeat v4+, LeaveGroup v4+, SyncGroup v4+, ApiVersions v3+.
+    # Caps are set to the highest version each handler's *response* fully implements.
+    # Two reasons a cap must be lowered:
+    #  (a) The version introduces new response fields the handler doesn't write
+    #      → client misparsed everything that follows the missing field.
+    #  (b) The version switches to "flexible" (compact varint) encoding
+    #      → this emulator uses fixed-width encoding throughout.
+    #
+    # Key thresholds (response-field additions):
+    #   Produce  v8: adds record_errors + error_message per partition
+    #   Fetch    v8: adds preferred_read_replica per partition
+    #   ListOffsets v5: adds leader_epoch per partition
+    #   Metadata v8: adds cluster_authorized_operations + topic_authorized_operations
+    #   OffsetFetch v6: adds leader_epoch per partition
+    # Flexible-encoding boundaries (also a hard limit):
+    #   Produce v9+, Fetch v12+, ListOffsets v6+, Metadata v9+, OffsetFetch v8+,
+    #   FindCoordinator v4+, JoinGroup v6+, Heartbeat/LeaveGroup/SyncGroup v4+,
+    #   ApiVersions v3+.
     apis = [
-        (0, 0, 8),    # Produce
-        (1, 0, 11),   # Fetch
-        (2, 0, 5),    # ListOffsets
-        (3, 0, 8),    # Metadata
-        (8, 0, 7),    # OffsetFetch
+        (0, 0, 7),    # Produce   (v8 adds record_errors to response)
+        (1, 0, 7),    # Fetch     (v8 adds preferred_read_replica to response)
+        (2, 0, 4),    # ListOffsets (v5 adds leader_epoch to response)
+        (3, 0, 7),    # Metadata  (v8 adds authorized_operations to response)
+        (8, 0, 5),    # OffsetFetch (v6 adds leader_epoch to response)
         (9, 0, 3),    # FindCoordinator
         (10, 0, 5),   # JoinGroup
         (11, 0, 3),   # Heartbeat
