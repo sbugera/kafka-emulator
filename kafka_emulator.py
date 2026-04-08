@@ -913,9 +913,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             # Read 4-byte length prefix
             size_bytes = await reader.readexactly(4)
             size = struct.unpack(">i", size_bytes)[0]
+            log.info(f"  raw size_bytes={size_bytes.hex()} parsed size={size}")
             if size <= 0:
+                log.warning(f"  Closing: non-positive frame size {size}")
                 break
             payload = await reader.readexactly(size)
+            log.info(f"  raw payload[0:20]={payload[:20].hex()}")
 
             r = Reader(payload)
             api_key = r.int16()
