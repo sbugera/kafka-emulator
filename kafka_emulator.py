@@ -512,7 +512,11 @@ def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> byt
             w._varint_u(0)       # per-entry tagged fields
         w.int32(0)               # throttle_time_ms
         w._varint_u(0)           # top-level tagged fields
-        return frame(correlation_id, w.build(), flexible=True)
+        # ApiVersions always uses Response Header v0 (no tagged-fields byte
+        # after correlation_id), even for v3+. It is the bootstrap request
+        # used before version negotiation completes, so the header format is
+        # fixed. Only the body uses flexible/compact encoding.
+        return frame(correlation_id, w.build())
 
     w = Writer()
     w.int16(0)  # error_code
