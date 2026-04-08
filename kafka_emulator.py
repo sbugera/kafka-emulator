@@ -470,18 +470,23 @@ HOST = "127.0.0.1"
 
 def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> bytes:
     # List all supported APIs
+    # Max versions are capped just below where the Kafka protocol switches to
+    # "flexible" (compact varint) encoding, which this emulator does not implement.
+    # Flexible encoding boundaries: Produce v9+, Fetch v12+, ListOffsets v6+,
+    # Metadata v9+, OffsetFetch v8+, FindCoordinator v4+, JoinGroup v6+,
+    # Heartbeat v4+, LeaveGroup v4+, SyncGroup v4+, ApiVersions v3+.
     apis = [
         (0, 0, 8),    # Produce
-        (1, 0, 12),   # Fetch
-        (2, 0, 6),    # ListOffsets
-        (3, 0, 12),   # Metadata
-        (8, 0, 8),    # OffsetFetch
-        (9, 0, 4),    # FindCoordinator
+        (1, 0, 11),   # Fetch
+        (2, 0, 5),    # ListOffsets
+        (3, 0, 8),    # Metadata
+        (8, 0, 7),    # OffsetFetch
+        (9, 0, 3),    # FindCoordinator
         (10, 0, 5),   # JoinGroup
-        (11, 0, 4),   # Heartbeat
-        (12, 0, 4),   # LeaveGroup
-        (13, 0, 5),   # SyncGroup
-        (18, 0, 3),   # ApiVersions
+        (11, 0, 3),   # Heartbeat
+        (12, 0, 3),   # LeaveGroup
+        (13, 0, 3),   # SyncGroup
+        (18, 0, 2),   # ApiVersions
     ]
     w = Writer()
     w.int16(0)  # error_code
@@ -533,7 +538,8 @@ def handle_metadata(r: Reader, api_version: int, correlation_id: int) -> bytes:
             w.int16(0)   # error_code
             w.int32(pid) # partition_index
             w.int32(1)   # leader_id
-            w.int32(0)   # leader_epoch (v7+)
+            if api_version >= 7:
+                w.int32(0)   # leader_epoch
             w.int32(1)   # replicas count
             w.int32(1)   # replica node
             w.int32(1)   # isr count
