@@ -889,17 +889,29 @@ def handle_init_producer_id(r: Reader, api_version: int, correlation_id: int) ->
     # kafka-clients 3.x enables idempotent producers by default, which requires
     # this API. Return a fixed producer_id so the client can proceed without
     # transactions.
-    _transactional_id = r.string()
-    _transaction_timeout_ms = r.int32()
+    # v3+ uses flexible encoding: compact strings + tagged fields throughout.
     if api_version >= 3:
+        _transactional_id = r.compact_string()
+        _transaction_timeout_ms = r.int32()
         _producer_id = r.int64()
         _producer_epoch = r.int16()
-    w = Writer()
-    w.int32(0)    # throttle_time_ms
-    w.int16(0)    # error_code
-    w.int64(1)    # producer_id
-    w.int16(0)    # producer_epoch
-    return frame(correlation_id, w.build())
+        r._varint_u()  # request tagged fields
+        w = Writer()
+        w.int32(0)    # throttle_time_ms
+        w.int16(0)    # error_code
+        w.int64(1)    # producer_id
+        w.int16(0)    # producer_epoch
+        w._varint_u(0)  # response tagged fields
+        return frame(correlation_id, w.build(), flexible=True)
+    else:
+        _transactional_id = r.string()
+        _transaction_timeout_ms = r.int32()
+        w = Writer()
+        w.int32(0)    # throttle_time_ms
+        w.int16(0)    # error_code
+        w.int64(1)    # producer_id
+        w.int16(0)    # producer_epoch
+        return frame(correlation_id, w.build())
 
 
 HANDLERS = {
