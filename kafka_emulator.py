@@ -10,12 +10,12 @@ Supported Kafka API keys:
   1  - Fetch
   2  - ListOffsets
   3  - Metadata
-  8  - OffsetFetch
-  9  - FindCoordinator
-  10 - JoinGroup
-  11 - Heartbeat
-  12 - LeaveGroup
-  13 - SyncGroup
+  9  - OffsetFetch
+  10 - FindCoordinator
+  11 - JoinGroup
+  12 - Heartbeat
+  13 - LeaveGroup
+  14 - SyncGroup
   18 - ApiVersions
 
 Usage:
@@ -490,12 +490,12 @@ def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> byt
         (1, 0, 7),    # Fetch
         (2, 0, 4),    # ListOffsets
         (3, 0, 7),    # Metadata
-        (8, 0, 5),    # OffsetFetch
-        (9, 0, 5),    # FindCoordinator (v4+ flexible with coordinator array)
-        (10, 0, 5),   # JoinGroup
-        (11, 0, 3),   # Heartbeat
-        (12, 0, 3),   # LeaveGroup
-        (13, 0, 3),   # SyncGroup
+        (9, 0, 5),    # OffsetFetch
+        (10, 0, 5),   # FindCoordinator (v4+ flexible with coordinator array)
+        (11, 0, 5),   # JoinGroup
+        (12, 0, 3),   # Heartbeat
+        (13, 0, 3),   # LeaveGroup
+        (14, 0, 3),   # SyncGroup
         (18, 0, 3),   # ApiVersions — we now support v3 (flexible encoding)
         (22, 0, 3),   # InitProducerId
     ]
@@ -942,20 +942,20 @@ HANDLERS = {
     1:  handle_fetch,
     2:  handle_list_offsets,
     3:  handle_metadata,
-    8:  handle_offset_fetch,
-    9:  handle_find_coordinator,
-    10: handle_join_group,
-    11: handle_heartbeat,
-    12: handle_leave_group,
-    13: handle_sync_group,
+    9:  handle_offset_fetch,
+    10: handle_find_coordinator,
+    11: handle_join_group,
+    12: handle_heartbeat,
+    13: handle_leave_group,
+    14: handle_sync_group,
     18: handle_api_versions,
     22: handle_init_producer_id,
 }
 
 API_NAMES = {
     0: "Produce", 1: "Fetch", 2: "ListOffsets", 3: "Metadata",
-    8: "OffsetFetch", 9: "FindCoordinator", 10: "JoinGroup",
-    11: "Heartbeat", 12: "LeaveGroup", 13: "SyncGroup", 18: "ApiVersions",
+    9: "OffsetFetch", 10: "FindCoordinator", 11: "JoinGroup",
+    12: "Heartbeat", 13: "LeaveGroup", 14: "SyncGroup", 18: "ApiVersions",
     22: "InitProducerId",
 }
 
@@ -987,7 +987,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             # Request Header v1 (standard): int16-length client_id string.
             # Flexible header thresholds: ApiVersions v3+, FindCoordinator v4+,
             # JoinGroup v6+, Heartbeat/LeaveGroup/SyncGroup v4+.
-            _FLEXIBLE_HDR = {18: 3, 9: 4, 10: 6, 11: 4, 12: 4, 13: 4}
+            _FLEXIBLE_HDR = {18: 3, 10: 4, 11: 6, 12: 4, 13: 4, 14: 4}
             if api_version >= _FLEXIBLE_HDR.get(api_key, 999):
                 client_id = r.compact_string()
                 r._varint_u()  # skip tagged fields
