@@ -25,6 +25,7 @@ Defaults: host=localhost, port=9092
 """
 
 import asyncio
+import inspect
 import struct
 import logging
 import argparse
@@ -98,6 +99,7 @@ class Broker:
         self._join_waiters: Dict[str, list] = defaultdict(list)
         self._join_timer: Dict[str, asyncio.TimerHandle] = {}
         self.REBALANCE_TIMEOUT = 0.3  # seconds to wait for more joiners
+        self._sync_events: Dict[str, asyncio.Event] = {}
 
     def ensure_topic(self, topic: str, num_partitions: int = 1):
         for p in range(num_partitions):
@@ -761,7 +763,39 @@ def handle_find_coordinator(r: Reader, api_version: int, correlation_id: int) ->
         return frame(correlation_id, w.build())
 
 
-def handle_join_group(r: Reader, api_version: int, correlation_id: int) -> bytes:
+async def _flush_join(group_id: str) -> None:
+    """Fire after REBALANCE_TIMEOUT: assign one generation to all pending joiners."""
+    waiters = list(BROKER._join_waiters[group_id])
+    BROKER._join_waiters[group_id] = []
+    BROKER._join_timer.pop(group_id, None)
+    if not waiters:
+        return
+
+    BROKER.group_generation[group_id] += 1
+    gen = BROKER.group_generation[group_id]
+
+    # Fresh sync state for this generation
+    BROKER._sync_events[group_id] = asyncio.Event()
+    BROKER.groups[group_id].pop("_assignments", None)
+
+    leader = waiters[0]["member_id"]
+    BROKER.group_leader[group_id] = leader
+
+    all_members: Dict[str, dict] = {}
+    for w in waiters:
+        mid = w["member_id"]
+        all_members[mid] = {"metadata": w["metadata"]}
+        BROKER.groups[group_id][mid] = {
+            "protocol": w["protocols"][0][0] if w["protocols"] else "range",
+            "metadata": w["metadata"],
+        }
+
+    for w in waiters:
+        if not w["future"].done():
+            w["future"].set_result((gen, leader, all_members))
+
+
+async def handle_join_group(r: Reader, api_version: int, correlation_id: int) -> bytes:
     log.info(f"JoinGroup body: {r.remaining()} bytes remaining, hex={r.buf[r.pos:].hex()}")
     group_id = r.string()
     _session_timeout = r.int32()
@@ -781,47 +815,48 @@ def handle_join_group(r: Reader, api_version: int, correlation_id: int) -> bytes
     if not member_id:
         member_id = str(uuid.uuid4())
 
-    group = BROKER.groups[group_id]
-    gen = BROKER.group_generation[group_id]
-
-    # Assign member
-    group[member_id] = {
-        "protocol": protocols[0][0] if protocols else "range",
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    BROKER._join_waiters[group_id].append({
+        "member_id": member_id,
+        "protocols": protocols,
         "metadata": protocols[0][1] if protocols else b"",
-    }
+        "future": fut,
+    })
 
-    # Leader is the first member
-    if group_id not in BROKER.group_leader or BROKER.group_leader[group_id] not in group:
-        BROKER.group_leader[group_id] = member_id
+    # Debounce: reset timer so all members joining near-simultaneously share one generation
+    old = BROKER._join_timer.pop(group_id, None)
+    if old:
+        old.cancel()
+    BROKER._join_timer[group_id] = loop.call_later(
+        BROKER.REBALANCE_TIMEOUT,
+        lambda: asyncio.ensure_future(_flush_join(group_id)),
+    )
 
-    leader = BROKER.group_leader[group_id]
-    BROKER.group_generation[group_id] = gen + 1
-    new_gen = BROKER.group_generation[group_id]
-
-    log.info(f"JoinGroup group={group_id} member={member_id[:8]}... leader={leader[:8]}... gen={new_gen}")
+    gen, leader, all_members = await fut
+    log.info(f"JoinGroup group={group_id} member={member_id[:8]}... leader={leader[:8]}... gen={gen}")
 
     w = Writer()
     if api_version >= 2:
         w.int32(0)   # throttle_time_ms
     w.int16(0)       # error_code
-    w.int32(new_gen) # generation_id
+    w.int32(gen)     # generation_id
     w.string(protocols[0][0] if protocols else "range")  # protocol_name
-    w.string(leader) # leader
+    w.string(leader)
     w.string(member_id)
-    # members (only sent to leader)
     if member_id == leader:
-        w.int32(len(group))
-        for mid, mdata in group.items():
+        w.int32(len(all_members))
+        for mid, mdata in all_members.items():
             w.string(mid)
             if api_version >= 5:
                 w.string(None)  # group_instance_id
-            w.bytes_(mdata.get("metadata", b""))
+            w.bytes_(mdata["metadata"])
     else:
         w.int32(0)
     return frame(correlation_id, w.build())
 
 
-def handle_sync_group(r: Reader, api_version: int, correlation_id: int) -> bytes:
+async def handle_sync_group(r: Reader, api_version: int, correlation_id: int) -> bytes:
     group_id = r.string()
     generation_id = r.int32()
     member_id = r.string()
@@ -836,12 +871,20 @@ def handle_sync_group(r: Reader, api_version: int, correlation_id: int) -> bytes
 
     log.info(f"SyncGroup group={group_id} member={member_id[:8]}... gen={generation_id}")
 
-    # Store assignments if leader sends them
+    event = BROKER._sync_events.get(group_id)
     if assignments:
+        # Leader: store assignments and wake non-leaders
         BROKER.groups[group_id]["_assignments"] = assignments
+        if event:
+            event.set()
+    elif event:
+        # Non-leader: wait up to 30 s for leader to send assignments
+        try:
+            await asyncio.wait_for(event.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            pass
 
-    stored = BROKER.groups[group_id].get("_assignments", {})
-    my_assignment = stored.get(member_id, b"")
+    my_assignment = BROKER.groups[group_id].get("_assignments", {}).get(member_id, b"")
 
     w = Writer()
     if api_version >= 1:
@@ -999,7 +1042,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             handler = HANDLERS.get(api_key)
             if handler:
                 try:
-                    response = handler(r, api_version, correlation_id)
+                    if inspect.iscoroutinefunction(handler):
+                        response = await handler(r, api_version, correlation_id)
+                    else:
+                        response = handler(r, api_version, correlation_id)
                     writer.write(response)
                     await writer.drain()
                 except Exception as e:
