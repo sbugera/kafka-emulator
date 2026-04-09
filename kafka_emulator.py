@@ -41,6 +41,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("kafka-emulator")
 
+# Delay (seconds) added to every Fetch response that contains data.
+# Caps the retry-loop rate when a listener keeps failing; also controls
+# how quickly a consumer sees newly produced messages.
+FETCH_DATA_DELAY_S: float = 5.0
 
 # ---------------------------------------------------------------------------
 # In-memory storage
@@ -670,7 +674,9 @@ async def handle_fetch(r: Reader, api_version: int, correlation_id: int) -> byte
             part_results.append((partition, fetch_offset, max_bytes, messages))
         all_results.append((topic, part_results))
 
-    if not has_data and max_wait_ms > 0:
+    if has_data:
+        await asyncio.sleep(FETCH_DATA_DELAY_S)
+    elif max_wait_ms > 0:
         await asyncio.sleep(max_wait_ms / 1000.0)
 
     w = Writer()
@@ -1111,8 +1117,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 writer.write(frame(correlation_id, b""))
                 await writer.drain()
 
-    except asyncio.IncompleteReadError:
+    except (asyncio.IncompleteReadError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
         pass
+    except OSError as e:
+        if e.errno in (64, 10054, 10053, 32):  # WinError 64, WSAECONNRESET, WSAECONNABORTED, EPIPE
+            pass
+        else:
+            log.error(f"Client {peer} error: {e}", exc_info=True)
     except Exception as e:
         log.error(f"Client {peer} error: {e}", exc_info=True)
     finally:
