@@ -492,6 +492,7 @@ def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> byt
         (1, 0, 7),    # Fetch
         (2, 0, 4),    # ListOffsets
         (3, 0, 7),    # Metadata
+        (8, 0, 7),    # OffsetCommit (v8+ flexible; cap at v7)
         (9, 0, 5),    # OffsetFetch
         (10, 0, 5),   # FindCoordinator (v4+ flexible with coordinator array)
         (11, 0, 5),   # JoinGroup
@@ -625,12 +626,9 @@ def handle_produce(r: Reader, api_version: int, correlation_id: int) -> bytes:
     return frame(correlation_id, w.build())
 
 
-def handle_fetch(r: Reader, api_version: int, correlation_id: int) -> bytes:
-    if api_version >= 3:
-        _replica_id = r.int32()
-    else:
-        _replica_id = r.int32()
-    _max_wait_ms = r.int32()
+async def handle_fetch(r: Reader, api_version: int, correlation_id: int) -> bytes:
+    _replica_id = r.int32()
+    max_wait_ms = r.int32()
     _min_bytes = r.int32()
     if api_version >= 3:
         _max_bytes = r.int32()
@@ -660,17 +658,31 @@ def handle_fetch(r: Reader, api_version: int, correlation_id: int) -> bytes:
     if api_version >= 7:
         _forgotten_count = r.int32()
 
+    # Collect data; if nothing available wait up to max_wait_ms (honours long-poll)
+    all_results = []
+    has_data = False
+    for topic, parts in fetch_list:
+        part_results = []
+        for partition, fetch_offset, max_bytes in parts:
+            messages = BROKER.fetch(topic, partition, fetch_offset, max_bytes)
+            if messages:
+                has_data = True
+            part_results.append((partition, fetch_offset, max_bytes, messages))
+        all_results.append((topic, part_results))
+
+    if not has_data and max_wait_ms > 0:
+        await asyncio.sleep(max_wait_ms / 1000.0)
+
     w = Writer()
     w.int32(0)  # throttle_time_ms
     if api_version >= 7:
         w.int16(0)   # error_code
         w.int32(0)   # session_id
-    w.int32(len(fetch_list))
-    for topic, parts in fetch_list:
+    w.int32(len(all_results))
+    for topic, part_results in all_results:
         w.string(topic)
-        w.int32(len(parts))
-        for partition, fetch_offset, max_bytes in parts:
-            messages = BROKER.fetch(topic, partition, fetch_offset, max_bytes)
+        w.int32(len(part_results))
+        for partition, fetch_offset, max_bytes, messages in part_results:
             batch = encode_record_batch(messages) if messages else b""
             w.int32(partition)
             w.int16(0)          # error_code
@@ -920,6 +932,42 @@ def handle_leave_group(r: Reader, api_version: int, correlation_id: int) -> byte
     return frame(correlation_id, w.build())
 
 
+def handle_offset_commit(r: Reader, api_version: int, correlation_id: int) -> bytes:
+    group_id = r.string()
+    if api_version >= 1:
+        _generation_id = r.int32()
+        _member_id = r.string()
+    if api_version >= 7:
+        _group_instance_id = r.string()
+    topic_count = r.int32()
+    results = []
+    for _ in range(topic_count):
+        topic = r.string()
+        part_count = r.int32()
+        parts = []
+        for _ in range(part_count):
+            partition = r.int32()
+            committed_offset = r.int64()
+            if api_version >= 6:
+                _leader_epoch = r.int32()
+            _metadata = r.string()
+            BROKER.commit_offset(group_id, topic, partition, committed_offset)
+            parts.append(partition)
+        results.append((topic, parts))
+    log.info(f"OffsetCommit group={group_id} topics={[t for t, _ in results]}")
+    w = Writer()
+    if api_version >= 3:
+        w.int32(0)  # throttle_time_ms
+    w.int32(len(results))
+    for topic, parts in results:
+        w.string(topic)
+        w.int32(len(parts))
+        for partition in parts:
+            w.int32(partition)
+            w.int16(0)  # error_code
+    return frame(correlation_id, w.build())
+
+
 def handle_offset_fetch(r: Reader, api_version: int, correlation_id: int) -> bytes:
     group_id = r.string()
     topic_count = r.int32()
@@ -987,6 +1035,7 @@ HANDLERS = {
     1:  handle_fetch,
     2:  handle_list_offsets,
     3:  handle_metadata,
+    8:  handle_offset_commit,
     9:  handle_offset_fetch,
     10: handle_find_coordinator,
     11: handle_join_group,
@@ -999,7 +1048,7 @@ HANDLERS = {
 
 API_NAMES = {
     0: "Produce", 1: "Fetch", 2: "ListOffsets", 3: "Metadata",
-    9: "OffsetFetch", 10: "FindCoordinator", 11: "JoinGroup",
+    8: "OffsetCommit", 9: "OffsetFetch", 10: "FindCoordinator", 11: "JoinGroup",
     12: "Heartbeat", 13: "LeaveGroup", 14: "SyncGroup", 18: "ApiVersions",
     22: "InitProducerId",
 }
