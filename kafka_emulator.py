@@ -439,17 +439,6 @@ def _varint_encode(v: int) -> bytes:
     return bytes(out)
 
 
-def _uvarint_encode(v: int) -> bytes:
-    out = bytearray()
-    while True:
-        b = v & 0x7F
-        v >>= 7
-        if v:
-            out.append(b | 0x80)
-        else:
-            out.append(b)
-            break
-    return bytes(out)
 
 
 def _encode_record_v2(offset_delta, ts_delta, key, value, headers) -> bytes:
@@ -470,9 +459,9 @@ def _encode_record_v2(offset_delta, ts_delta, key, value, headers) -> bytes:
     body += _varint_encode(len(headers))
     for hk, hv in headers:
         hk_enc = hk.encode()
-        body += _uvarint_encode(len(hk_enc))
+        body += _varint_encode(len(hk_enc))
         body += hk_enc
-        body += _uvarint_encode(len(hv))
+        body += _varint_encode(len(hv))
         body += hv
 
     out = _varint_encode(len(body)) + bytes(body)
