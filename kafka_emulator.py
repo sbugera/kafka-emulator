@@ -1105,12 +1105,21 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         response = handler(r, api_version, correlation_id)
                     writer.write(response)
                     await writer.drain()
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                    return
+                except OSError as e:
+                    if e.errno in (64, 10054, 10053, 32):
+                        return
+                    log.error(f"Error handling {api_name}: {e}", exc_info=True)
+                    return
                 except Exception as e:
                     log.error(f"Error handling {api_name}: {e}", exc_info=True)
-                    # Send a generic error response
-                    w = Writer().int16(35)  # UNKNOWN_SERVER_ERROR
-                    writer.write(frame(correlation_id, w.build()))
-                    await writer.drain()
+                    try:
+                        w = Writer().int16(35)  # UNKNOWN_SERVER_ERROR
+                        writer.write(frame(correlation_id, w.build()))
+                        await writer.drain()
+                    except OSError:
+                        return
             else:
                 log.warning(f"Unhandled API key {api_key} ({api_name})")
                 # Return empty response to avoid client hang
