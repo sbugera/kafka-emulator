@@ -391,11 +391,10 @@ def encode_record_batch(messages: List[Message]) -> bytes:
         )
         records_buf += rec
 
-    # batch without CRC (we'll set CRC=0, clients accept it in test scenarios)
     batch_inner = bytearray()
     batch_inner += struct.pack(">i", 0)          # partition leader epoch
     batch_inner += struct.pack(">b", 2)          # magic = 2
-    batch_inner += struct.pack(">I", 0)          # crc placeholder
+    batch_inner += struct.pack(">I", 0)          # crc (filled below)
     batch_inner += struct.pack(">h", 0)          # attributes
     batch_inner += struct.pack(">i", len(messages) - 1)  # last offset delta
     batch_inner += struct.pack(">q", base_ts)    # base timestamp
@@ -405,12 +404,24 @@ def encode_record_batch(messages: List[Message]) -> bytes:
     batch_inner += struct.pack(">i", -1)         # base sequence
     batch_inner += struct.pack(">i", len(messages))  # record count
     batch_inner += records_buf
+    # CRC32c covers everything after the CRC field (from attributes onward)
+    struct.pack_into(">I", batch_inner, 5, _crc32c(bytes(batch_inner[9:])))
 
     result = bytearray()
     result += struct.pack(">q", base_offset)
     result += struct.pack(">i", len(batch_inner))
     result += batch_inner
     return bytes(result)
+
+
+def _crc32c(data: bytes) -> int:
+    """CRC32c (Castagnoli) — required by Kafka v2 record batch format."""
+    crc = 0xFFFFFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0x82F63B78 if crc & 1 else crc >> 1
+    return crc ^ 0xFFFFFFFF
 
 
 def _varint_encode(v: int) -> bytes:
