@@ -1066,12 +1066,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             # Read 4-byte length prefix
             size_bytes = await reader.readexactly(4)
             size = struct.unpack(">i", size_bytes)[0]
-            log.info(f"  raw size_bytes={size_bytes.hex()} parsed size={size}")
+            log.debug(f"  raw size_bytes={size_bytes.hex()} parsed size={size}")
             if size <= 0:
                 log.warning(f"  Closing: non-positive frame size {size}")
                 break
             payload = await reader.readexactly(size)
-            log.info(f"  raw payload[0:20]={payload[:20].hex()}")
+            log.debug(f"  raw payload[0:20]={payload[:20].hex()}")
 
             r = Reader(payload)
             api_key = r.int16()
@@ -1088,7 +1088,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 r._varint_u()  # skip tagged fields (header v2 only)
 
             api_name = API_NAMES.get(api_key, f"Unknown({api_key})")
-            log.info(f"← {api_name} v{api_version} corr={correlation_id} client={client_id}")
+            log.debug(f"← {api_name} v{api_version} corr={correlation_id} client={client_id}")
 
             handler = HANDLERS.get(api_key)
             if handler:
@@ -1139,5 +1139,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Kafka Protocol Emulator")
     parser.add_argument("--host", default="localhost", help="Bind host (default: localhost)")
     parser.add_argument("--port", type=int, default=9092, help="Bind port (default: 9092)")
+    parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging (raw frames, all requests)")
     args = parser.parse_args()
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
     asyncio.run(main(args.host, args.port))
