@@ -481,16 +481,17 @@ def handle_api_versions(r: Reader, api_version: int, correlation_id: int) -> byt
     #   ListOffsets v5: adds leader_epoch per partition
     #   Metadata v8: adds cluster/topic authorized_operations fields
     #   OffsetFetch v6: adds leader_epoch per partition
-    # Flexible-encoding boundary (also a hard cap for non-ApiVersions APIs):
+    # Flexible-encoding boundary (hard cap unless implemented with flexible encoding):
     #   Produce v9+, Fetch v12+, ListOffsets v6+, Metadata v9+, OffsetFetch v8+,
-    #   FindCoordinator v4+, JoinGroup v6+, Heartbeat/LeaveGroup/SyncGroup v4+.
+    #   JoinGroup v6+, Heartbeat/LeaveGroup/SyncGroup v4+.
+    #   FindCoordinator v4+ IS implemented with flexible encoding (cap raised to v5).
     apis = [
         (0, 0, 7),    # Produce
         (1, 0, 7),    # Fetch
         (2, 0, 4),    # ListOffsets
         (3, 0, 7),    # Metadata
         (8, 0, 5),    # OffsetFetch
-        (9, 0, 3),    # FindCoordinator
+        (9, 0, 5),    # FindCoordinator (v4+ flexible with coordinator array)
         (10, 0, 5),   # JoinGroup
         (11, 0, 3),   # Heartbeat
         (12, 0, 3),   # LeaveGroup
@@ -723,23 +724,45 @@ def handle_list_offsets(r: Reader, api_version: int, correlation_id: int) -> byt
 
 
 def handle_find_coordinator(r: Reader, api_version: int, correlation_id: int) -> bytes:
-    key = r.string()
-    if api_version >= 1:
+    if api_version >= 4:
+        # v4+: flexible encoding; key_type first, then compact array of keys.
         _key_type = r.int8()
-    log.info(f"FindCoordinator key={key}")
-    w = Writer()
-    if api_version >= 1:
-        w.int32(0)   # throttle_time_ms
-    w.int16(0)       # error_code
-    if api_version >= 1:
-        w.string(None)  # error_message
-    w.int32(1)       # node_id
-    w.string(HOST)
-    w.int32(9092)
-    return frame(correlation_id, w.build())
+        n_keys = r._varint_u() - 1          # compact array length
+        keys = [r.compact_string() for _ in range(n_keys)]
+        r._varint_u()                        # body tagged fields
+        log.info(f"FindCoordinator v{api_version} key_type={_key_type} keys={keys}")
+        w = Writer()
+        w.int32(0)                           # throttle_time_ms
+        w._varint_u(len(keys) + 1)           # compact array of coordinators
+        for key in keys:
+            w.compact_string(key)            # key echoed back
+            w.int32(1)                       # node_id
+            w.compact_string(HOST)           # host
+            w.int32(9092)                    # port
+            w.int16(0)                       # error_code
+            w.compact_string(None)           # error_message (null)
+            w._varint_u(0)                   # per-entry tagged fields
+        w._varint_u(0)                       # top-level tagged fields
+        return frame(correlation_id, w.build(), flexible=True)
+    else:
+        key = r.string()
+        if api_version >= 1:
+            _key_type = r.int8()
+        log.info(f"FindCoordinator key={key}")
+        w = Writer()
+        if api_version >= 1:
+            w.int32(0)       # throttle_time_ms
+        w.int16(0)           # error_code
+        if api_version >= 1:
+            w.string(None)   # error_message
+        w.int32(1)           # node_id
+        w.string(HOST)
+        w.int32(9092)
+        return frame(correlation_id, w.build())
 
 
 def handle_join_group(r: Reader, api_version: int, correlation_id: int) -> bytes:
+    log.info(f"JoinGroup body: {r.remaining()} bytes remaining, hex={r.buf[r.pos:].hex()}")
     group_id = r.string()
     _session_timeout = r.int32()
     if api_version >= 1:
@@ -960,10 +983,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             api_key = r.int16()
             api_version = r.int16()
             correlation_id = r.int32()
-            # ApiVersions v3+ uses Request Header v2 where client_id is a
-            # compact (varint-length) string followed by a tagged-fields varint.
-            # All other API versions we support use Header v1 (int16-length string).
-            if api_key == 18 and api_version >= 3:
+            # Request Header v2 (flexible): compact client_id + tagged-fields varint.
+            # Request Header v1 (standard): int16-length client_id string.
+            # Flexible header thresholds: ApiVersions v3+, FindCoordinator v4+,
+            # JoinGroup v6+, Heartbeat/LeaveGroup/SyncGroup v4+.
+            _FLEXIBLE_HDR = {18: 3, 9: 4, 10: 6, 11: 4, 12: 4, 13: 4}
+            if api_version >= _FLEXIBLE_HDR.get(api_key, 999):
                 client_id = r.compact_string()
                 r._varint_u()  # skip tagged fields
             else:

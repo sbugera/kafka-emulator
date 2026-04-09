@@ -19,12 +19,26 @@ The entire emulator is a single file (`kafka_emulator.py`) implementing a subset
 
 **Protocol encoding**: `Reader`/`Writer` classes wrap `struct.pack/unpack` for the Kafka binary types. Two encoding styles are used:
 - Standard (most requests): fixed-width int16/int32/int64, length-prefixed strings/bytes.
-- Flexible/compact (NOT implemented): varint-encoded lengths + tagged fields, used by Kafka ≥ v9 for most APIs.
+- Flexible/compact: varint-encoded lengths + tagged fields, used by ApiVersions v3+, FindCoordinator v4+, and Kafka ≥ v9 for most other APIs.
 
-**Version cap rule**: `handle_api_versions` advertises max versions just below where each API switches to flexible encoding. This is intentional — do not raise these caps without implementing compact encoding in the corresponding handler. The thresholds are: Produce v9+, Fetch v12+, ListOffsets v6+, Metadata v9+, OffsetFetch v8+, FindCoordinator v4+, JoinGroup v6+, Heartbeat/LeaveGroup/SyncGroup v4+, ApiVersions v3+.
+**Version cap rule**: `handle_api_versions` advertises max versions just below where each API switches to flexible encoding. This is intentional — do not raise these caps without implementing compact encoding in the corresponding handler. The thresholds are: Produce v9+, Fetch v12+, ListOffsets v6+, Metadata v9+, OffsetFetch v8+, JoinGroup v6+, Heartbeat/LeaveGroup/SyncGroup v4+, ApiVersions v3+.
+
+**FindCoordinator v4+**: fully implemented with flexible encoding. v4+ changed the schema: request is `key_type(INT8) + coordinator_keys(COMPACT_ARRAY)`, response is `coordinators(COMPACT_ARRAY)` with per-coordinator fields. Request header also uses flexible format (compact client_id + tagged fields). Cap is raised to v5.
 
 **In-memory state** (`Broker` singleton): topics → partitions → `TopicPartition` (list of `Message`). Topics are auto-created on first Metadata or Produce request. State is lost on restart.
 
 **Record batches**: Kafka v2 record batch format is fully implemented for both encode (`encode_record_batch`) and decode (`decode_record_batch`). Legacy magic 0/1 batches are decoded best-effort only.
 
 **Consumer groups**: JoinGroup/SyncGroup/Heartbeat/LeaveGroup are implemented synchronously (no async rebalance barrier). The first member to join becomes the leader and is responsible for sending partition assignments in SyncGroup.
+
+## Hard constraints
+- NEVER explain reasoning
+- NEVER include background context
+- ONLY output final answers or code
+
+## Response rules
+- Be extremaly concise
+- No explanation unless explicitly requested
+- Prefer bullet points
+- Max 5 lines unless asked otherwise
+- No reasoning text
