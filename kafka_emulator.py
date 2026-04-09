@@ -722,6 +722,8 @@ def handle_list_offsets(r: Reader, api_version: int, correlation_id: int) -> byt
             if api_version >= 1:
                 w.int64(-1)  # timestamp
             w.int64(offset)
+            if api_version >= 4:
+                w.int32(-1)  # leader_epoch
     return frame(correlation_id, w.build())
 
 
