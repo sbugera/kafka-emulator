@@ -467,7 +467,7 @@ def _encode_record_v2(offset_delta, ts_delta, key, value, headers) -> bytes:
         body += value
     else:
         body += _varint_encode(-1)
-    body += _uvarint_encode(len(headers))
+    body += _varint_encode(len(headers))
     for hk, hv in headers:
         hk_enc = hk.encode()
         body += _uvarint_encode(len(hk_enc))
