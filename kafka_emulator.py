@@ -983,16 +983,15 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             api_key = r.int16()
             api_version = r.int16()
             correlation_id = r.int32()
-            # Request Header v2 (flexible): compact client_id + tagged-fields varint.
-            # Request Header v1 (standard): int16-length client_id string.
+            # Request Header v2 (flexible): same NULLABLE_STRING client_id as v1,
+            # plus a trailing tagged-fields varint (TAG_BUFFER).
+            # Request Header v1 (standard): int16-length client_id string only.
             # Flexible header thresholds: ApiVersions v3+, FindCoordinator v4+,
             # JoinGroup v6+, Heartbeat/LeaveGroup/SyncGroup v4+.
             _FLEXIBLE_HDR = {18: 3, 10: 4, 11: 6, 12: 4, 13: 4, 14: 4}
+            client_id = r.string()
             if api_version >= _FLEXIBLE_HDR.get(api_key, 999):
-                client_id = r.compact_string()
-                r._varint_u()  # skip tagged fields
-            else:
-                client_id = r.string()
+                r._varint_u()  # skip tagged fields (header v2 only)
 
             api_name = API_NAMES.get(api_key, f"Unknown({api_key})")
             log.info(f"← {api_name} v{api_version} corr={correlation_id} client={client_id}")
